@@ -1,0 +1,23 @@
+{
+  "name": "local-ai-architecture-demo",
+  "version": "1.0.0",
+  "description": "A zero-API-key classroom demo of Client/Server + Local LLM (Ollama) + LangGraph orchestration + RAG & MCP tool concepts.",
+  "type": "module",
+  "scripts": {
+    "start": "bun run app.ts",
+    "start:node": "node --loader ts-node/esm app.ts"
+  },
+  "dependencies": {
+    "@elysiajs/cors": "^1.4.2",
+    "@elysiajs/node": "^1.4.5",
+    "@langchain/core": "^1.2.2",
+    "@langchain/langgraph": "^1.4.7",
+    "@langchain/ollama": "^1.3.0",
+    "elysia": "^1.4.9",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.2"
+  }
+}

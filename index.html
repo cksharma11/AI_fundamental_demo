@@ -1,0 +1,525 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Local Agent Console</title>
+
+  <!-- Tailwind Play CDN: no build step, so this file opens straight in a
+       browser. (It does need internet to fetch the CDN script once; for a
+       fully offline room, vendor tailwind.min.css next to this file instead.) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    // A small, deliberate palette. Violet reads "graph / signal" without the
+    // usual AI-demo clichés; the mono face carries the technical labels.
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            ink: "#0F172A",
+            accent: "#7C3AED",
+            "accent-soft": "#EDE9FE",
+            hair: "#E2E8F0",
+          },
+          fontFamily: {
+            mono: ["ui-monospace", "SFMono-Regular", "Menlo", "monospace"],
+          },
+        },
+      },
+    };
+  </script>
+
+  <style>
+    /* Preserve newlines the model returns without allowing overflow. */
+    .msg-body { white-space: pre-wrap; word-break: break-word; }
+
+    /* Architecture map: every box is a real file/module in this repo. States
+       are driven purely by SSE events from POST /chat/stream — nothing here
+       is a canned animation, it reflects the actual request in flight. */
+    .node {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 2px;
+      min-width: 96px;
+      padding: 8px 10px;
+      border-radius: 10px;
+      border: 1px solid #E2E8F0;
+      background: #F8FAFC;
+      color: #64748B;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11px;
+      text-align: center;
+      transition: background-color .25s, border-color .25s, color .25s, transform .25s;
+    }
+    .node .icon { font-size: 16px; line-height: 1; }
+    .node .path { font-size: 9px; color: #94A3B8; }
+    .node.is-active {
+      background: #FEF3C7; border-color: #F59E0B; color: #92400E; transform: translateY(-1px);
+      animation: nodePulse 1.1s ease-in-out infinite;
+    }
+    .node.is-active .path { color: #B45309; }
+    .node.is-done { background: #ECFDF5; border-color: #34D399; color: #065F46; }
+    .node.is-done .path { color: #059669; }
+    .node.is-error { background: #FFF1F2; border-color: #FB7185; color: #9F1239; }
+    .node.is-error .path { color: #E11D48; }
+    @keyframes nodePulse {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(245,158,11,.35); }
+      50%      { box-shadow: 0 0 0 6px rgba(245,158,11,.12); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .node.is-active { animation: none; }
+    }
+    .arrow { color: #CBD5E1; font-size: 14px; }
+
+    /* Per-message trace: attached under each assistant reply, showing the
+       exact SSE events that produced *that* answer — not a shared/global
+       panel, a receipt scoped to the message above it. */
+    details.trace { width: fit-content; max-width: 100%; }
+    details.trace summary { list-style: none; }
+    details.trace summary::-webkit-details-marker { display: none; }
+    details.trace .chev { display: inline-block; transition: transform .15s; }
+    details.trace[open] .chev { transform: rotate(90deg); }
+    details.trace .line { display: flex; gap: 6px; padding: 1px 0; white-space: pre-wrap; word-break: break-word; }
+    details.trace .t { color: #64748B; flex-shrink: 0; }
+    details.trace .tag { flex-shrink: 0; }
+    details.trace .tag-phase   { color: #93C5FD; }
+    details.trace .tag-call    { color: #FCD34D; }
+    details.trace .tag-result  { color: #6EE7B7; }
+    details.trace .tag-final   { color: #A7F3D0; font-weight: 600; }
+    details.trace .tag-failure { color: #FDA4AF; font-weight: 600; }
+  </style>
+</head>
+
+<body class="h-screen overflow-hidden bg-[#F5F7FA] text-ink antialiased">
+  <main class="mx-auto flex h-screen max-w-3xl flex-col overflow-hidden px-4 py-6 sm:py-10">
+
+    <!-- Header: what this is, and the exact endpoint it talks to. Pinned in
+         place (shrink-0, non-scrolling) — only the transcript below scrolls. -->
+    <header class="mb-4 shrink-0">
+      <div class="flex items-center justify-between gap-3">
+        <div>
+          <h1 class="text-xl font-semibold tracking-tight">Local Agent Console</h1>
+          <p class="text-sm text-slate-500">A window onto the LangGraph agent running on your machine.</p>
+        </div>
+        <span id="status" class="inline-flex shrink-0 items-center gap-2 rounded-full border border-hair bg-white px-3 py-1 font-mono text-xs text-slate-500">
+          <span id="statusDot" class="h-2 w-2 rounded-full bg-slate-300"></span>
+          <span id="statusText">idle</span>
+        </span>
+      </div>
+
+      <!-- Architecture map: the fixed set of real components a request can
+           touch, each labeled with the source file that implements it. Boxes
+           light up amber while active and turn green once that step is done,
+           driven live by Server-Sent Events from GET /chat/stream. The blow-
+           by-blow trace for each answer is attached under that answer in the
+           transcript below, not shown here. -->
+      <div class="mt-4 rounded-xl border border-hair bg-white p-3 sm:p-4">
+        <div class="flex flex-wrap items-center justify-center gap-2">
+          <div class="node" data-node="browser">
+            <span class="icon">🌐</span><span>Browser</span><span class="path">index.html</span>
+          </div>
+          <span class="arrow">&rarr;</span>
+          <div class="node" data-node="server">
+            <span class="icon">🖥️</span><span>Server</span><span class="path">src/server.ts</span>
+          </div>
+          <span class="arrow">&rarr;</span>
+          <div class="node" data-node="agent">
+            <span class="icon">🧠</span><span>Agent</span><span class="path">graph/nodes.ts</span>
+          </div>
+          <span class="arrow">&#8644;</span>
+          <div class="node" data-node="llm">
+            <span class="icon">🦙</span><span>Local LLM</span><span class="path">llm.ts · Ollama</span>
+          </div>
+        </div>
+
+        <div class="my-1.5 flex items-center justify-center gap-2">
+          <span class="arrow">&#8597;</span>
+          <span class="font-mono text-[10px] text-slate-400">loops until the model stops calling tools</span>
+        </div>
+
+        <div class="flex flex-wrap items-center justify-center gap-2">
+          <div class="node" data-node="tools">
+            <span class="icon">🛠️</span><span>Tools</span><span class="path">graph/nodes.ts</span>
+          </div>
+          <span class="arrow">&rarr;</span>
+          <div class="node" data-node="rag">
+            <span class="icon">📚</span><span>RAG</span><span class="path">tools/rag.ts</span>
+          </div>
+          <span class="arrow text-[10px]">or</span>
+          <div class="node" data-node="mcp">
+            <span class="icon">📂</span><span>MCP</span><span class="path">tools/mcp.ts</span>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <!-- Scrollable transcript area — the only part of the page that scrolls.
+         The header (map + trace log) above and the composer below stay put. -->
+    <div id="scrollArea" class="flex-1 overflow-y-auto rounded-xl">
+      <!-- Conversation transcript. -->
+      <section id="messages" class="space-y-4" aria-live="polite" aria-label="Conversation"></section>
+
+      <!-- Empty state doubles as a prompt: the chips map to the two tools the
+           backend actually exposes (RAG knowledge base + MCP file reader). -->
+      <div id="empty" class="flex h-full flex-col items-center justify-center gap-4 text-center">
+        <p class="max-w-sm text-sm text-slate-500">Ask the agent something. It decides on its own whether to search the knowledge base or read a local file — watch the map above light up as it does.</p>
+        <div class="flex flex-wrap justify-center gap-2">
+          <button class="example rounded-full border border-hair bg-white px-3 py-1.5 text-sm text-slate-600 transition hover:border-accent hover:text-accent">What is the grading policy?</button>
+          <button class="example rounded-full border border-hair bg-white px-3 py-1.5 text-sm text-slate-600 transition hover:border-accent hover:text-accent">When does the AI class meet?</button>
+          <button class="example rounded-full border border-hair bg-white px-3 py-1.5 text-sm text-slate-600 transition hover:border-accent hover:text-accent">Read syllabus.txt</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Composer. Pinned (shrink-0) at the bottom of the viewport. -->
+    <div class="mt-4 shrink-0 rounded-xl border border-hair bg-white p-2 shadow-sm focus-within:border-accent">
+      <div class="flex items-end gap-2">
+        <textarea id="prompt" rows="1" placeholder="Ask the agent&hellip;  (Enter to send, Shift+Enter for a new line)"
+          class="max-h-40 flex-1 resize-none bg-transparent px-2 py-1.5 text-sm outline-none placeholder:text-slate-400"></textarea>
+        <button id="send"
+          class="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white transition hover:bg-violet-700 focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-40">
+          Send
+        </button>
+      </div>
+    </div>
+    <p class="mt-3 shrink-0 text-center font-mono text-[11px] text-slate-400">Requires <span class="text-slate-500">app.ts</span> running on :8000 and Ollama serving llama3.2.</p>
+  </main>
+
+  <script>
+    // The two endpoints this page talks to. /chat/stream drives the live
+    // architecture map + trace log; /chat is the plain fallback.
+    const STREAM_ENDPOINT = "http://localhost:8000/chat/stream";
+    const CHAT_ENDPOINT = "http://localhost:8000/chat";
+
+    // Which node in the architecture map a tool_call/tool_result event maps
+    // to — must match the tool `name`s in src/tools/registry.ts.
+    const TOOL_NODE = {
+      knowledge_base_search: "rag",
+      read_local_file: "mcp",
+    };
+
+    const el = {
+      messages: document.getElementById("messages"),
+      empty: document.getElementById("empty"),
+      prompt: document.getElementById("prompt"),
+      send: document.getElementById("send"),
+      statusDot: document.getElementById("statusDot"),
+      statusText: document.getElementById("statusText"),
+    };
+
+    const nodes = {};
+    document.querySelectorAll(".node").forEach((n) => (nodes[n.dataset.node] = n));
+
+    let working = false;
+    let currentSource = null;
+    let requestStartedAt = 0;
+
+    function setStatus(state) {
+      // state: "idle" | "working" | "ok" | "error"
+      const map = {
+        idle:    ["bg-slate-300",  "idle"],
+        working: ["bg-amber-400",  "thinking&hellip;"],
+        ok:      ["bg-emerald-500", "ready"],
+        error:   ["bg-rose-500",   "error"],
+      };
+      const [dotClass, label] = map[state];
+      el.statusDot.className = "h-2 w-2 rounded-full " + dotClass;
+      el.statusText.innerHTML = label;
+    }
+
+    // Builds the "how it got here" block attached under an assistant message:
+    // a collapsible, terminal-styled receipt of the exact SSE events (from
+    // GET /chat/stream) that produced *that specific* answer.
+    function buildTraceDetails(trace) {
+      const details = document.createElement("details");
+      details.className =
+        "trace rounded-lg border border-slate-800 bg-slate-900 font-mono text-[11px] text-slate-300";
+      details.open = true;
+
+      const summary = document.createElement("summary");
+      summary.className =
+        "flex cursor-pointer select-none items-center gap-1.5 px-3 py-1.5 text-slate-400 hover:text-slate-200";
+      summary.innerHTML =
+        '<span class="chev">&#9656;</span><span>How it got here &middot; ' + trace.length + " steps</span>";
+      details.appendChild(summary);
+
+      const body = document.createElement("div");
+      body.className = "space-y-0.5 border-t border-slate-800 px-3 py-2";
+      for (const step of trace) {
+        const line = document.createElement("div");
+        line.className = "line";
+        line.innerHTML =
+          '<span class="t">[' + step.t + ']</span>' +
+          '<span class="tag ' + step.tagClass + '">' + step.tagLabel + "</span>" +
+          "<span>" + step.text + "</span>";
+        body.appendChild(line);
+      }
+      details.appendChild(body);
+      return details;
+    }
+
+    function appendMessage(role, text, opts) {
+      const { isError, trace } = opts || {};
+      el.empty.remove?.(); // first message clears the empty state
+      const row = document.createElement("div");
+      row.className = "flex " + (role === "user" ? "justify-end" : "justify-start");
+
+      // A column so a multi-part assistant reply (bubble + trace) stacks and
+      // aligns together, while user messages stay a single bubble.
+      const col = document.createElement("div");
+      col.className = "flex max-w-[85%] flex-col gap-1.5 " + (role === "user" ? "items-end" : "items-start");
+
+      const bubble = document.createElement("div");
+      const base = "msg-body rounded-2xl px-4 py-2.5 text-sm leading-relaxed";
+      if (role === "user") {
+        bubble.className = base + " bg-accent text-white";
+      } else if (isError) {
+        bubble.className = base + " border border-rose-200 bg-rose-50 text-rose-700";
+      } else {
+        // Assistant answers get a left accent rule — a small nod to the fact
+        // that this text came back out of the graph, not from the user.
+        bubble.className = base + " border border-hair border-l-2 border-l-accent bg-white text-ink";
+      }
+      bubble.textContent = text;
+      col.appendChild(bubble);
+
+      if (trace && trace.length) {
+        col.appendChild(buildTraceDetails(trace));
+      }
+
+      row.appendChild(col);
+      el.messages.appendChild(row);
+      row.scrollIntoView({ behavior: "smooth", block: "end" });
+    }
+
+    // --- Architecture map -----------------------------------------------
+
+    function resetMap() {
+      Object.values(nodes).forEach((n) => n.classList.remove("is-active", "is-done", "is-error"));
+    }
+
+    function setNode(key, state) {
+      // state: "active" | "done" | "error"
+      const n = nodes[key];
+      if (!n) return;
+      n.classList.remove("is-active", "is-done", "is-error");
+      n.classList.add("is-" + state);
+    }
+
+    // --- Trace accumulator --------------------------------------------------
+    //
+    // Not a shared panel — each request builds its own ordered array of
+    // steps, which gets attached under that turn's assistant bubble (see
+    // buildTraceDetails) once the answer (or a failure) arrives.
+
+    let currentTrace = [];
+
+    function resetTrace() {
+      currentTrace = [];
+      requestStartedAt = performance.now();
+    }
+
+    function truncate(text, max) {
+      const s = String(text);
+      return s.length > max ? s.slice(0, max) + "…" : s;
+    }
+
+    function pushTrace(tagClass, tagLabel, text) {
+      const t = ((performance.now() - requestStartedAt) / 1000).toFixed(2) + "s";
+      currentTrace.push({ t, tagClass, tagLabel, text });
+    }
+
+    function setWorking(on) {
+      working = on;
+      el.send.disabled = on;
+      el.prompt.disabled = on;
+      setStatus(on ? "working" : "ok");
+    }
+
+    function closeStream() {
+      if (currentSource) {
+        currentSource.close();
+        currentSource = null;
+      }
+    }
+
+    function escapeHtml(s) {
+      return s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+    }
+
+    // --- Sending a prompt ---------------------------------------------------
+    //
+    // Primary path: open an SSE connection to GET /chat/stream. LangGraph's
+    // agent loop (src/graph/) is observed node-by-node on the server and each
+    // real step — not a canned sequence — is forwarded here as an event. Each
+    // event both animates the architecture map above and accumulates into
+    // currentTrace, which gets attached under the assistant's reply once it
+    // arrives (see buildTraceDetails).
+
+    function sendViaStream(prompt) {
+      resetMap();
+      resetTrace();
+      setNode("browser", "active");
+
+      let sawFailure = false;
+      let connected = false;
+
+      const url = STREAM_ENDPOINT + "?prompt=" + encodeURIComponent(prompt);
+      const es = new EventSource(url);
+      currentSource = es;
+
+      es.onopen = () => {
+        connected = true;
+        setNode("browser", "done");
+        setNode("server", "active");
+      };
+
+      es.addEventListener("phase", (e) => {
+        const { phase, detail } = JSON.parse(e.data);
+        pushTrace("tag-phase", "phase", escapeHtml(detail));
+        if (phase === "server") {
+          setNode("server", "done");
+        } else if (phase === "llm") {
+          setNode("agent", "active");
+          setNode("llm", "active");
+          setNode("tools", "done");
+        } else if (phase === "tools") {
+          setNode("agent", "done");
+          setNode("llm", "done");
+          setNode("tools", "active");
+        }
+      });
+
+      es.addEventListener("tool_call", (e) => {
+        const { tool, args } = JSON.parse(e.data);
+        const nodeKey = TOOL_NODE[tool] || "tools";
+        setNode(nodeKey, "active");
+        pushTrace("tag-call", "call", escapeHtml(tool) + "(" + escapeHtml(JSON.stringify(args)) + ")");
+      });
+
+      es.addEventListener("tool_result", (e) => {
+        const { tool, result } = JSON.parse(e.data);
+        const nodeKey = TOOL_NODE[tool] || "tools";
+        setNode(nodeKey, "done");
+        pushTrace("tag-result", "result", escapeHtml(tool) + " &rarr; " + escapeHtml(truncate(result, 140)));
+      });
+
+      es.addEventListener("final", (e) => {
+        const { content } = JSON.parse(e.data);
+        setNode("agent", "done");
+        setNode("llm", "done");
+        setNode("server", "done");
+        setNode("browser", "done");
+        pushTrace("tag-final", "final", "answer produced (" + content.length + " chars)");
+        appendMessage("assistant", content, { trace: currentTrace });
+      });
+
+      // Named "failure", not "error" — an SSE event literally named "error"
+      // collides with EventSource's own native connection-error event.
+      es.addEventListener("failure", (e) => {
+        const { message } = JSON.parse(e.data);
+        sawFailure = true;
+        pushTrace("tag-failure", "failure", escapeHtml(message));
+        ["agent", "llm", "tools"].forEach((k) => {
+          if (nodes[k].classList.contains("is-active")) setNode(k, "error");
+        });
+        appendMessage("assistant", message, { isError: true, trace: currentTrace });
+      });
+
+      es.addEventListener("done", () => {
+        closeStream();
+        setWorking(false);
+        setStatus(sawFailure ? "error" : "ok");
+      });
+
+      es.onerror = () => {
+        // The server always ends the stream with a "done" event, which we use
+        // to close the connection ourselves; if this fires with no prior
+        // events at all, the server was never reachable in the first place —
+        // EventSource would otherwise retry forever, so bail out explicitly.
+        if (connected) return;
+        closeStream();
+        setNode("browser", "error");
+        appendMessage(
+          "assistant",
+          "Couldn't reach the agent at " + STREAM_ENDPOINT + ".\n\n" +
+          "Check that app.ts is running (bun run app.ts) and listening on port 8000.",
+          { isError: true },
+        );
+        setStatus("error");
+        setWorking(false);
+      };
+    }
+
+    // Fallback for browsers without EventSource support: same request, no
+    // live animation, just the final answer (mirrors the original behavior).
+    async function sendViaFetch(prompt) {
+      try {
+        const res = await fetch(CHAT_ENDPOINT, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ prompt }),
+        });
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data || data.status !== "success") {
+          appendMessage("assistant", data?.response || `Server responded with ${res.status}.`, { isError: true });
+          setStatus("error");
+          return;
+        }
+        appendMessage("assistant", data.response);
+        setStatus("ok");
+      } catch (err) {
+        appendMessage("assistant", "Couldn't reach the agent at " + CHAT_ENDPOINT + ".", { isError: true });
+        setStatus("error");
+      } finally {
+        setWorking(false);
+      }
+    }
+
+    function send() {
+      const prompt = el.prompt.value.trim();
+      if (!prompt || working) return;
+
+      appendMessage("user", prompt);
+      el.prompt.value = "";
+      el.prompt.style.height = "auto";
+      setWorking(true);
+      closeStream();
+
+      if (typeof EventSource !== "undefined") {
+        sendViaStream(prompt);
+      } else {
+        sendViaFetch(prompt);
+      }
+    }
+
+    // Enter sends; Shift+Enter inserts a newline.
+    el.prompt.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        send();
+      }
+    });
+
+    // Grow the textarea with its content, up to the CSS max-height.
+    el.prompt.addEventListener("input", () => {
+      el.prompt.style.height = "auto";
+      el.prompt.style.height = el.prompt.scrollHeight + "px";
+    });
+
+    el.send.addEventListener("click", send);
+
+    // Example chips prefill the composer and focus it, so a demo can start in
+    // one tap without typing.
+    document.querySelectorAll(".example").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        el.prompt.value = btn.textContent;
+        el.prompt.focus();
+      });
+    });
+
+    el.prompt.focus();
+  </script>
+</body>
+</html>
